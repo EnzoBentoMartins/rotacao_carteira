@@ -110,6 +110,15 @@ if st.button('Distribuir Clientes'):
     # Exibir a tabela de distribuição
     st.subheader('Tabela de Distribuição de Clientes')
     st.write(tabela_distribuicao)
+
+    excel_data = to_excel(st.session_state.tabela_distribuicao)
+
+    st.download_button(
+        label="Baixar tabela clientes distribuidos",
+        data=excel_data,  # Passando os dados binários gerados
+        file_name="clientes_Distribuidos.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     
     # Exibir clientes remanescentes
     st.subheader('Clientes Remanescentes (Próxima Rodada)')
@@ -132,3 +141,4 @@ if len(st.session_state.tabela_distribuicao) > 0:
     
     # Chama a função para mostrar os clientes do vendedor
     mostrar_clientes(vendedor_selecionado, st.session_state.tabela_distribuicao)
+
