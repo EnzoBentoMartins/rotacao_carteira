@@ -4,4 +4,4 @@ streamlit
 seaborn
 xlsxwriter
 openpyxl
-gunicorn
+pyodbc
