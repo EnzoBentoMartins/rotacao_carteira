@@ -382,22 +382,22 @@ if st.button("📄 Gerar Relatório Completo e por Vendedor"):
 
         st.success("✅ Relatórios gerados com sucesso!")
 
-        # Botões de download para cada relatório individual
-        for vendedor, arquivo in arquivos_gerados.items():
-            with open(arquivo, 'rb') as f:
-                st.download_button(
-                    label=f"📥 Baixar Relatório de {vendedor}",
-                    data=f,
-                    file_name=arquivo.split('/')[-1],
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+        # Gerar um único arquivo ZIP contendo todos os relatórios
+        zip_file_path = '/tmp/relatorios_rotacao.zip'
+        with zipfile.ZipFile(zip_file_path, 'w') as zipf:
+            # Adiciona o relatório completo
+            zipf.write('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'relatorio_mensal_completo.xlsx')
 
-        # Botão de download para o relatório completo
-        with open('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'rb') as f:
+            # Adiciona os relatórios individuais de cada vendedor
+            for vendedor, arquivo in arquivos_gerados.items():
+                zipf.write(arquivo, arquivo.split('/')[-1])
+
+        # Botão de download para todos os relatórios em um único arquivo ZIP
+        with open(zip_file_path, 'rb') as f:
             st.download_button(
-                label="📥 Baixar Relatório Completo",
+                label="📥 Baixar Todos os Relatórios",
                 data=f,
-                file_name="relatorio_mensal_completo.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name="relatorios_rotacao.zip",
+                mime="application/zip"
             )
 
