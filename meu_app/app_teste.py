@@ -113,7 +113,7 @@ arquivo_referencia = st.file_uploader("📤 Envie o arquivo de referência (.xls
 if arquivo_referencia:
     df = carregar_dados_sql()
     df = df.drop_duplicates(subset='Raiz_CNPJ')
-    referencia = pd.read_excel('contas_que_entraram_20_03_2025.xlsx', sheet_name='Planilha1')
+    referencia = pd.read_excel(arquivo_referencia, sheet_name='Planilha1')
 
     df['Raiz_CNPJ'] = df['Raiz_CNPJ'].astype(str).str.strip().str.zfill(14)
     referencia['Raiz_CNPJ Irão entrar'] = referencia['Raiz_CNPJ Irão entrar'].astype(str).str.strip().str.zfill(14)
