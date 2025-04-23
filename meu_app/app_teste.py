@@ -382,22 +382,22 @@ if st.button("📄 Gerar Relatório Completo e por Vendedor"):
 
         st.success("✅ Relatórios gerados com sucesso!")
 
-        # Botões de download para cada relatório individual
-        for vendedor, arquivo in arquivos_gerados.items():
-            with open(arquivo, 'rb') as f:
-                st.download_button(
-                    label=f"📥 Baixar Relatório de {vendedor}",
-                    data=f,
-                    file_name=arquivo.split('/')[-1],
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-        # Botão de download para o relatório completo
-        with open('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'rb') as f:
+    # Botões de download para cada relatório individual
+    for vendedor, arquivo in arquivos_gerados.items():
+        with open(arquivo, 'rb') as f:
             st.download_button(
-                label="📥 Baixar Relatório Completo",
+                label=f"📥 Baixar Relatório de {vendedor}",
                 data=f,
-                file_name="relatorio_mensal_completo.xlsx",
+                file_name=arquivo.split('/')[-1],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+    # Botão de download para o relatório completo
+    with open('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'rb') as f:
+        st.download_button(
+            label="📥 Baixar Relatório Completo",
+            data=f,
+            file_name="relatorio_mensal_completo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
