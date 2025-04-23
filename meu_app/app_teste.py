@@ -368,6 +368,10 @@ if st.button("📄 Gerar Relatório Completo e por Vendedor"):
                     df_relatorio.to_excel(nome_arquivo_vendedor, index=False)
                     arquivos_por_vendedor[vendedor] = nome_arquivo_vendedor
 
+                    # Adiciona ao relatório mensal completo como uma aba
+                    aba = vendedor[:31]  # Limite de 31 caracteres no nome da aba
+                    df_relatorio.to_excel(writer, sheet_name=aba, index=False)
+
             writer.close()
 
             return arquivos_por_vendedor
