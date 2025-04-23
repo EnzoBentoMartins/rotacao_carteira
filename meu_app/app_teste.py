@@ -300,6 +300,7 @@ if st.button("📄 Gerar Relatórios Mensais"):
                 df['Data_Entrou_Carteira'] = pd.to_datetime(df['Data_Entrou_Carteira'], errors='coerce')
                 df['Data_Ultima_Venda_Grupo_CNPJ'] = pd.to_datetime(df['Data_Ultima_Venda_Grupo_CNPJ'], errors='coerce')
 
+            # Criação do writer do Excel
             writer = pd.ExcelWriter(f'{pasta_destino}/relatorio_mensal_completo.xlsx', engine='xlsxwriter')
             vendedores = df_atual['Nome_Vendedor'].dropna().unique()
 
@@ -316,6 +317,7 @@ if st.button("📄 Gerar Relatórios Mensais"):
                 usados = set()
                 blocos = []
 
+                # Filtro das contas para cada status
                 ativas = anterior_vend[
                     (anterior_vend['Data_Ultima_Venda_Grupo_CNPJ'] >= data_limite) &
                     (~anterior_vend['Raiz_CNPJ'].isin(usados))
@@ -353,10 +355,12 @@ if st.button("📄 Gerar Relatórios Mensais"):
                 usados.update(retiradas['Raiz_CNPJ'])
                 blocos.append(montar_bloco(retiradas, 'Retiradas'))
 
+                # Combina todos os blocos e organiza
                 df_relatorio = pd.concat(blocos, ignore_index=True)
                 df_relatorio = df_relatorio.drop_duplicates(subset='Raiz_CNPJ', keep='first')
                 df_relatorio = df_relatorio.sort_values(['Status', 'Razao_Social_Pessoas']).reset_index(drop=True)
 
+                # Salva no Excel
                 if not df_relatorio.empty:
                     aba = vendedor[:31]
                     df_relatorio.to_excel(writer, sheet_name=aba, index=False)
@@ -366,11 +370,27 @@ if st.button("📄 Gerar Relatórios Mensais"):
             writer.close()
             return f"✅ Relatórios salvos em '{pasta_destino}' com sucesso!"
 
+        # Definir os parâmetros e gerar o relatório
         resultado_relatorio = gerar_relatorios(
-    		st.session_state["contas_rotacionadas"],
-    		df_filtrado,
-    		data_limite=data_limite,
-    		data_rotacao=pd.Timestamp.today().normalize(),
-			pasta_destino=pasta_relatorios
-		)
+            st.session_state["contas_rotacionadas"],
+            df_filtrado,
+            data_limite=data_limite,
+            data_rotacao=pd.Timestamp.today().normalize(),
+            pasta_destino='Relatorio_Rotação'
+        )
+        
         st.success(resultado_relatorio)
+
+        # Agora, ofereça o botão para download do arquivo
+        # Caminho do arquivo final
+        arquivo_final = 'Relatorio_Rotação/relatorio_mensal_completo.xlsx'
+        
+        # Criar botão para download do arquivo
+        with open(arquivo_final, 'rb') as f:
+            st.download_button(
+                label="📥 Baixar Relatório Completo",
+                data=f,
+                file_name=arquivo_final.split('/')[-1],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
