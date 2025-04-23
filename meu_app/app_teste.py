@@ -290,7 +290,7 @@ if st.button("📄 Gerar Relatórios Mensais"):
     if "contas_rotacionadas" not in st.session_state:
         st.warning("⚠️ Você precisa realizar a rotação antes de gerar o relatório.")
     else:
-        def gerar_relatorios(df_atual, df_anterior, data_limite, data_rotacao, pasta_destino='Relatorio_Rotação'):
+        def gerar_relatorios(df_atual, df_anterior, data_limite, data_rotacao, pasta_destino='Downloads'):
             os.makedirs(pasta_destino, exist_ok=True)
 
             data_rotacao = pd.to_datetime(data_rotacao).normalize()
@@ -376,7 +376,7 @@ if st.button("📄 Gerar Relatórios Mensais"):
             df_filtrado,
             data_limite=data_limite,
             data_rotacao=pd.Timestamp.today().normalize(),
-            pasta_destino='Relatorio_Rotação'
+            pasta_destino='Downloads'
         )
         
         st.success(resultado_relatorio)
