@@ -117,9 +117,9 @@ if arquivo_referencia:
     referencia = pd.read_excel(arquivo_referencia, sheet_name='Planilha1')
 
     df['Raiz_CNPJ'] = df['Raiz_CNPJ'].astype(str).str.strip().str.zfill(14)
-    referencia['Raiz_CNPJ Irão entrar'] = referencia['Raiz_CNPJ Irão entrar'].astype(str).str.strip().str.zfill(14)
+    referencia['Raiz_CNPJ'] = referencia['Raiz_CNPJ'].astype(str).str.strip().str.zfill(14)
 
-    dict_transferencia = dict(zip(referencia['Raiz_CNPJ Irão entrar'], referencia['Nome_Vendedor']))
+    dict_transferencia = dict(zip(referencia['Raiz_CNPJ'], referencia['Nome_Vendedor']))
 
     # Atualiza o Nome_Vendedor do df conforme a referência
     df['Nome_Vendedor'] = df.apply(
@@ -129,7 +129,7 @@ if arquivo_referencia:
 
     # Agora você pode adicionar a data de entrada
     df['Data_Entrou_Carteira'] = np.where(
-        df['Raiz_CNPJ'].isin(referencia['Raiz_CNPJ Irão entrar']),
+        df['Raiz_CNPJ'].isin(referencia['Raiz_CNPJ']),
         pd.Timestamp('2025-03-20'),
         pd.NaT
     )
