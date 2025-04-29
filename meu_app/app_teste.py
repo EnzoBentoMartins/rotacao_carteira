@@ -263,7 +263,7 @@ def gerar_excel_download(df):
     from io import BytesIO
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Dados')
+        df.to_excel(writer, index=False, sheet_name='Planilha1')
     return output.getvalue()
 
 if "contas_rotacionadas" in st.session_state:
