@@ -40,6 +40,7 @@ def carregar_dados_sql():
     c.[grupo_nome] AS Grupo_Econômico_Nome,
     v.razao_social AS Nome_Vendedor,
     b.[data_ultima_venda] AS Data_Ultima_Venda_Individual,
+    COALESCE(f.valor_total, 0) AS Faturamento_6_Meses,  -- Aqui está o preenchimento com 0
     a.[data_abertura] AS Data_Abertura_Conta,
     CASE 
         WHEN c.[grupo_id] IS NOT NULL THEN 
@@ -55,19 +56,32 @@ def carregar_dados_sql():
     a.classificacao_id AS Classificacao_Conta,
     b.classificacao_id AS Classificacao_Pessoa,
     a.porte_id AS Porte_Empresa,
-    (SELECT TOP 1 d.id FROM [dbo].[rel_crm_orcamentos] AS d WHERE d.pessoa_cliente_id = b.id ORDER BY d.data_emissao DESC) AS Orcamento_ID,
-    (SELECT TOP 1 d.data_emissao FROM [dbo].[rel_crm_orcamentos] AS d WHERE d.pessoa_cliente_id = b.id ORDER BY d.data_emissao DESC) AS Data_Emissao_Ultimo_Orcamento
+    (SELECT TOP 1 d.id 
+     FROM [dbo].[rel_crm_orcamentos] AS d 
+     WHERE d.pessoa_cliente_id = b.id 
+     ORDER BY d.data_emissao DESC) AS Orcamento_ID,
+    (SELECT TOP 1 d.data_emissao 
+     FROM [dbo].[rel_crm_orcamentos] AS d 
+     WHERE d.pessoa_cliente_id = b.id 
+     ORDER BY d.data_emissao DESC) AS Data_Emissao_Ultimo_Orcamento
 FROM
     [grupofort].[dbo].[crm_contas] AS a
     INNER JOIN [dbo].[pessoas] AS b ON a.cliente_id = b.id
     INNER JOIN [dbo].[rel_pessoas] AS c ON b.id = c.id
     INNER JOIN [dbo].[pessoas] AS v ON a.vendedor_id = v.id
+    LEFT JOIN (
+        SELECT pessoa_id, SUM(valor_total) AS valor_total
+        FROM [dbo].[rel_faturamento]
+        WHERE data_emissao >= DATEADD(MONTH, -6, GETDATE())
+        GROUP BY pessoa_id
+    ) AS f ON a.cliente_id = f.pessoa_id
 WHERE
     a.tipo_conta = 2
     AND a.excluido = 0
     AND a.status_conta = 0
     AND b.classificacao_id <> 1
-    AND a.classificacao_id <> 1;"""
+    AND a.classificacao_id <> 1;
+"""
     df = pd.read_sql(query, conn)
     conn.close()
     return df
@@ -312,7 +326,7 @@ if st.button("📄 Gerar Relatório Completo e por Vendedor"):
                 anterior_vend = df_anterior[df_anterior['Nome_Vendedor'] == vendedor].copy()
 
                 def montar_bloco(df, status):
-                    bloco = df[['Nome_Vendedor', 'Razao_Social_Pessoas', 'Raiz_CNPJ',
+                    bloco = df[['Nome_Vendedor', 'Razao_Social_Pessoas', 'Raiz_CNPJ', 'Faturamento_6_Meses',
                                 'Data_Ultima_Venda_Grupo_CNPJ', 'Data_Entrou_Carteira']].copy()
                     bloco.insert(0, 'Status', status)
                     return bloco
@@ -388,7 +402,7 @@ if st.button("📄 Gerar Relatório Completo e por Vendedor"):
         st.success("✅ Relatórios gerados com sucesso!")
 
         # Gerar um único arquivo ZIP contendo todos os relatórios
-        zip_file_path = '/tmp/relatorios_rotacao.zip'
+        zip_file_path = os.path.join(os.getcwd(), 'relatorios_rotacao.zip')
         with zipfile.ZipFile(zip_file_path, 'w') as zipf:
             # Adiciona o relatório completo
             zipf.write('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'relatorio_mensal_completo.xlsx')
