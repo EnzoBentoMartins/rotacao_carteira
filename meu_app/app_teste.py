@@ -30,7 +30,17 @@ def carregar_dados_sql():
 
     conn = pyodbc.connect(connection_string)
 
-    query = """SELECT 
+    query = """-- CTE para calcular a data máxima por raiz do CNPJ
+WITH UltimaVendaPorRaiz AS (
+    SELECT 
+        LEFT(cpf_cnpj, 8) AS Raiz_CNPJ,
+        MAX(data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ
+    FROM dbo.pessoas
+    WHERE data_ultima_venda IS NOT NULL
+    GROUP BY LEFT(cpf_cnpj, 8)
+)
+
+SELECT 
     a.[id] AS Conta_ID,
     a.tipo_conta,
     b.razao_social AS Razao_Social_Pessoas,
@@ -40,19 +50,9 @@ def carregar_dados_sql():
     c.[grupo_nome] AS Grupo_Econômico_Nome,
     v.razao_social AS Nome_Vendedor,
     b.[data_ultima_venda] AS Data_Ultima_Venda_Individual,
-    COALESCE(f.valor_total, 0) AS Faturamento_6_Meses,  -- Aqui está o preenchimento com 0
-    a.[data_abertura] AS Data_Abertura_Conta,
-    CASE 
-        WHEN c.[grupo_id] IS NOT NULL THEN 
-            ISNULL(
-                (SELECT MAX(p.data_ultima_venda) 
-                 FROM [dbo].[pessoas] p
-                 INNER JOIN [dbo].[rel_pessoas] r ON p.id = r.id
-                 WHERE r.grupo_id = c.[grupo_id] AND p.data_ultima_venda IS NOT NULL),
-                b.[data_ultima_venda]
-            )
-        ELSE b.[data_ultima_venda]
-    END AS Data_Ultima_Venda_Grupo_CNPJ,
+    COALESCE(f.valor_total, 0) AS Faturamento_6_Meses,
+    a.[data_cadastro] AS Data_Abertura_Conta,
+    ISNULL(u.Data_Ultima_Venda_Grupo_CNPJ, b.data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ,
     a.classificacao_id AS Classificacao_Conta,
     b.classificacao_id AS Classificacao_Pessoa,
     a.porte_id AS Porte_Empresa,
@@ -69,6 +69,7 @@ FROM
     INNER JOIN [dbo].[pessoas] AS b ON a.cliente_id = b.id
     INNER JOIN [dbo].[rel_pessoas] AS c ON b.id = c.id
     INNER JOIN [dbo].[pessoas] AS v ON a.vendedor_id = v.id
+    LEFT JOIN UltimaVendaPorRaiz AS u ON LEFT(b.cpf_cnpj, 8) = u.Raiz_CNPJ
     LEFT JOIN (
         SELECT pessoa_id, SUM(valor_total) AS valor_total
         FROM [dbo].[rel_faturamento]
