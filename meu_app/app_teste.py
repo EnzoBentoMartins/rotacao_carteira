@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import tempfile
 import pyodbc
 import sqlite3
 import zipfile
@@ -10,6 +11,41 @@ from datetime import datetime, timedelta
 
 import warnings
 warnings.filterwarnings('ignore')
+
+def connect_db():
+    conn = sqlite3.connect("vendedores.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vendedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL UNIQUE,
+            tipo TEXT NOT NULL CHECK(tipo IN ('Distribuição', 'Corporativo'))
+        )
+    """)
+    conn.commit()
+    return conn
+
+def carregar_vendedores():
+    conn = sqlite3.connect("vendedores.db")
+    df = pd.read_sql("SELECT nome, tipo FROM vendedores", conn)
+    return df
+
+def criar_tabela_historico():
+        conn = sqlite3.connect('historico_rotacao.db')
+        c = conn.cursor()
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS historico_rotacao (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome_vendedor TEXT,
+            conta_id INTEGER,
+            tipo_rotacao TEXT,
+            data_rotacao TEXT
+        )
+        ''')
+        conn.commit()
+        conn.close()
+
+criar_tabela_historico()
 
 # ---------- CONFIGURAÇÕES INICIAIS ----------
 st.set_page_config(page_title="Rotação de Carteiras", layout="wide")
@@ -30,52 +66,104 @@ def carregar_dados_sql():
 
     conn = pyodbc.connect(connection_string)
 
-    query = """-- CTE para calcular a data máxima por raiz do CNPJ
-WITH UltimaVendaPorRaiz AS (
+    query = """-- CTEs para pré-processamento
+WITH Faturamento AS (
+    SELECT pessoa_id, SUM(valor_total) AS valor_total
+    FROM dbo.rel_faturamento
+    WHERE data_emissao >= DATEADD(MONTH, -6, GETDATE())
+    GROUP BY pessoa_id
+),
+Followups AS (
+    SELECT pessoa_id, COUNT(*) AS total_followups, MAX(data_cadastro) AS data_ultimo_followup
+    FROM dbo.pessoas_followup_anexos
+    GROUP BY pessoa_id
+),
+Contatos AS (
+    SELECT pessoa_id, COUNT(*) AS total_contatos, MAX(data_cadastro) AS data_ultimo_contato
+    FROM dbo.contatos
+    GROUP BY pessoa_id
+),
+Oportunidades AS (
     SELECT 
-        LEFT(cpf_cnpj, 8) AS Raiz_CNPJ,
-        MAX(data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ
+        conta_id AS pessoa_id, 
+        COUNT(*) AS total_oportunidades, 
+        MAX(data_cadastro) AS data_ultima_oportunidade
+    FROM dbo.crm_oportunidades
+    GROUP BY conta_id
+),
+UltimaVendaPorRaizCNPJ AS (
+    SELECT LEFT(cpf_cnpj, 8) AS Raiz_CNPJ, MAX(data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ
     FROM dbo.pessoas
     WHERE data_ultima_venda IS NOT NULL
     GROUP BY LEFT(cpf_cnpj, 8)
+),
+Pedidos AS (
+    SELECT 
+        pessoa_id,
+        COUNT(*) AS total_pedidos
+    FROM dbo.rel_faturamento
+    WHERE data_emissao >= DATEADD(MONTH, -6, GETDATE())
+    GROUP BY pessoa_id
+),
+Orcamentos AS (
+    SELECT 
+        pessoa_cliente_id,
+        COUNT(*) AS total_orcamentos,
+        MAX(data_emissao) AS data_ultimo_orcamento
+    FROM dbo.rel_crm_orcamentos
+    GROUP BY pessoa_cliente_id
 )
 
+-- Query principal
 SELECT 
-    a.[id] AS Conta_ID,
+    a.id AS Conta_ID,
     a.tipo_conta,
     b.razao_social AS Razao_Social_Pessoas,
     b.cpf_cnpj AS CNPJ,
     LEFT(b.cpf_cnpj, 8) AS Raiz_CNPJ,
-    c.[grupo_id] AS Grupo_Econômico_ID,
-    c.[grupo_nome] AS Grupo_Econômico_Nome,
+    c.grupo_id AS Grupo_Econômico_ID,
+    c.grupo_nome AS Grupo_Econômico_Nome,
     v.razao_social AS Nome_Vendedor,
-    b.[data_ultima_venda] AS Data_Ultima_Venda_Individual,
+    b.data_ultima_venda AS Data_Ultima_Venda_Individual,
     COALESCE(f.valor_total, 0) AS Faturamento_6_Meses,
-    a.[data_cadastro] AS Data_Abertura_Conta,
-    ISNULL(u.Data_Ultima_Venda_Grupo_CNPJ, b.data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ,
+    a.data_cadastro AS Data_Abertura_Conta,
+    COALESCE(p.total_pedidos, 0) AS Total_Pedidos,
+    COALESCE(g.Data_Ultima_Venda_Grupo_CNPJ, b.data_ultima_venda) AS Data_Ultima_Venda_Grupo_CNPJ,
+    COALESCE(fu.total_followups, 0) AS Total_Followups,
+    fu.data_ultimo_followup AS Data_Ultimo_Followup,
+    COALESCE(ct.total_contatos, 0) AS Total_Contatos,
+    ct.data_ultimo_contato AS Data_Ultimo_Contato,
+    COALESCE(o.total_oportunidades, 0) AS Total_Oportunidades,
+    o.data_ultima_oportunidade AS Data_Ultima_Oportunidade,
     a.classificacao_id AS Classificacao_Conta,
     b.classificacao_id AS Classificacao_Pessoa,
     a.porte_id AS Porte_Empresa,
-    (SELECT TOP 1 d.id 
-     FROM [dbo].[rel_crm_orcamentos] AS d 
-     WHERE d.pessoa_cliente_id = b.id 
-     ORDER BY d.data_emissao DESC) AS Orcamento_ID,
-    (SELECT TOP 1 d.data_emissao 
-     FROM [dbo].[rel_crm_orcamentos] AS d 
-     WHERE d.pessoa_cliente_id = b.id 
-     ORDER BY d.data_emissao DESC) AS Data_Emissao_Ultimo_Orcamento
+
+    -- Total e último orçamento por cliente
+    (
+        SELECT COUNT(*) 
+        FROM dbo.rel_crm_orcamentos d
+        WHERE d.pessoa_cliente_id = b.id
+    ) AS Total_Orcamentos,
+
+    (
+        SELECT MAX(data_emissao)
+        FROM dbo.rel_crm_orcamentos d
+        WHERE d.pessoa_cliente_id = b.id
+    ) AS Data_Ultimo_Orcamento
+
 FROM
-    [grupofort].[dbo].[crm_contas] AS a
-    INNER JOIN [dbo].[pessoas] AS b ON a.cliente_id = b.id
-    INNER JOIN [dbo].[rel_pessoas] AS c ON b.id = c.id
-    INNER JOIN [dbo].[pessoas] AS v ON a.vendedor_id = v.id
-    LEFT JOIN UltimaVendaPorRaiz AS u ON LEFT(b.cpf_cnpj, 8) = u.Raiz_CNPJ
-    LEFT JOIN (
-        SELECT pessoa_id, SUM(valor_total) AS valor_total
-        FROM [dbo].[rel_faturamento]
-        WHERE data_emissao >= DATEADD(MONTH, -6, GETDATE())
-        GROUP BY pessoa_id
-    ) AS f ON a.cliente_id = f.pessoa_id
+    grupofort.dbo.crm_contas a
+    INNER JOIN dbo.pessoas b ON a.cliente_id = b.id
+    INNER JOIN dbo.rel_pessoas c ON b.id = c.id
+    INNER JOIN dbo.pessoas v ON a.vendedor_id = v.id
+    LEFT JOIN Faturamento f ON a.cliente_id = f.pessoa_id
+    LEFT JOIN Followups fu ON b.id = fu.pessoa_id
+    LEFT JOIN Contatos ct ON b.id = ct.pessoa_id
+    LEFT JOIN Oportunidades o ON a.id = o.pessoa_id
+    LEFT JOIN UltimaVendaPorRaizCNPJ g ON LEFT(b.cpf_cnpj, 8) = g.Raiz_CNPJ
+    LEFT JOIN Pedidos p ON a.cliente_id = p.pessoa_id
+
 WHERE
     a.tipo_conta = 2
     AND a.excluido = 0
@@ -89,58 +177,191 @@ WHERE
 
 # ---------- SELEÇÃO DE GRUPO DE VENDEDORES ----------
 
-vendedores_ativos_helder = ['Bryan Casarotto',
-'Daniele Schmitz',
-'GILBERTO LIMA DE PINHO JUNIOR',
-'Laura Vitoria Da Silveira Trindade',
-'Leonardo Bianchi',
-'Letícia Eduarda Cruz',
-'LUCAS VASCONCELOS BATTAGLIA KRAUSE',
-'RONALDO DA COSTA BARRIOS',
-'Ruan da Silva',
-'TALIA LINS RAMOS',
-'Willian Luiz Pereira'
+conn = connect_db()
+cursor = conn.cursor()
+df_vendedores = carregar_vendedores()
+
+st.markdown("#### 🛠️ **Gerencie o cadastro de seus vendedores ⬇️**")
+with st.expander("Clique aqui para expandir"):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### ➕ Cadastrar vendedor")
+        df_dados_empresa = carregar_dados_sql()
+        nomes_vendedores_empresa = sorted(df_dados_empresa['Nome_Vendedor'].dropna().unique().tolist())
+
+        # Adiciona opções extras
+        opcoes = [""] + nomes_vendedores_empresa + ["Outro (digitar manualmente)"]
+
+        nome = st.selectbox(
+            "Digite ou selecione o nome do vendedor",
+            options=opcoes,
+            index=0,  # começa vazio
+            placeholder="Busque ou digite o nome..."
+        )
+
+        # Se escolher "Outro", mostrar campo manual
+        if nome == "Outro (digitar manualmente)":
+            nome = st.text_input("Digite o nome manualmente")
+        tipo = st.selectbox("Tipo", ["Distribuição", "Corporativo"])
+        if st.button("Cadastrar vendedor"):
+            if nome.strip() == "":
+                st.warning("Digite um nome válido.")
+            elif nome in df_vendedores["nome"].values:
+                st.warning("Esse nome já está cadastrado.")
+            else:
+                cursor.execute("INSERT INTO vendedores (nome, tipo) VALUES (?, ?)", (nome.strip(), tipo))
+                conn.commit()
+                st.success(f"{nome} adicionado com sucesso!")
+                st.rerun()
+
+    with col2:
+        st.markdown("### Lista de vendedores")
+
+        distribuidores = df_vendedores[df_vendedores["tipo"] == "Distribuição"]["nome"].tolist()
+        corporativos = df_vendedores[df_vendedores["tipo"] == "Corporativo"]["nome"].tolist()
+
+        def remover_vendedor(nome):
+            cursor.execute("DELETE FROM vendedores WHERE nome = ?", (nome,))
+            conn.commit()
+            st.success(f"Vendedor '{nome}' removido com sucesso.")
+            st.rerun()
+
+        # Inicializa a variável de confirmação no estado da sessão, se não existir
+        if "confirma_remocao" not in st.session_state:
+            st.session_state.confirma_remocao = None
+
+        def pedir_confirmacao(nome):
+            st.session_state.confirma_remocao = nome
+
+        def cancelar_remocao():
+            st.session_state.confirma_remocao = None
+
+        st.markdown("#### Distribuição")
+        if distribuidores:
+            for nome in distribuidores:
+                if st.session_state.confirma_remocao == nome:
+                    st.warning(f"Tem certeza que deseja remover **{nome}**?")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button("✅ Confirmar remoção", key=f"confirmar_{nome}"):
+                            remover_vendedor(nome)
+                    with col_b:
+                        if st.button("❌ Cancelar", key=f"cancelar_{nome}"):
+                            cancelar_remocao()
+                else:
+                    col1, col2 = st.columns([8,1])
+                    with col1:
+                        st.write(nome)
+                    with col2:
+                        st.button(f"❌", key=f"remover_dist_{nome}", on_click=pedir_confirmacao, args=(nome,))
+        else:
+            st.write("_Nenhum vendedor cadastrado._")
+
+        st.markdown("#### Corporativo")
+        if corporativos:
+            for nome in corporativos:
+                if st.session_state.confirma_remocao == nome:
+                    st.warning(f"Tem certeza que deseja remover **{nome}**?")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button("✅ Confirmar remoção", key=f"confirmar_{nome}"):
+                            remover_vendedor(nome)
+                    with col_b:
+                        if st.button("❌ Cancelar", key=f"cancelar_{nome}"):
+                            cancelar_remocao()
+                else:
+                    col1, col2 = st.columns([8,1])
+                    with col1:
+                        st.write(nome)
+                    with col2:
+                        st.button(f"❌", key=f"remover_dist_{nome}", on_click=pedir_confirmacao, args=(nome,))
+        else:
+            st.write("_Nenhum vendedor cadastrado._")
+
+query = "SELECT nome FROM vendedores WHERE tipo = ?"
+cursor.execute(query, ('Distribuição',))
+vendedores_ativos_helder = [
+    row[0] for row in cursor.fetchall()
 ]
 
-vendedores_ativos_karen = ['Amanda Dias do Amaral',
-'CRISTIAN RHEINHEIMER',
-'Eduardo Dutra de Lima',
-'GUSTAVO BALBINOTT VENASSI',
-'Guilherme Rafael Hartmann Soares',
-'Gustavo Cesar Burnier',
-'JOAO PEDRO MOCELIN',
-'Joao Gustavo Santian Da Silva',
-'Kaylane Victoria Sousa Sa',
-'LUCAS SIMOES BERNART',
-'MARJANA  KUHN',
-'MAURICIO HENRIQUE CESCO',
-'MURILO DUARTE DA SILVA',
-'Sidinei Da Silva Dias',
-'TIAGO PEDROSO DA SILVA'
+# 'Bryan Casarotto',
+# 'Daniele Schmitz',
+# 'GILBERTO LIMA DE PINHO JUNIOR',
+# 'Laura Vitoria Da Silveira Trindade',
+# 'Leonardo Bianchi',
+# 'Letícia Eduarda Cruz',
+# 'LUCAS VASCONCELOS BATTAGLIA KRAUSE',
+# 'RONALDO DA COSTA BARRIOS',
+# 'Ruan da Silva',
+# 'TALIA LINS RAMOS',
+# 'Willian Luiz Pereira'
+
+query = "SELECT nome FROM vendedores WHERE tipo = ?"
+cursor.execute(query, ('Corporativo',))
+vendedores_ativos_karen = [
+    row[0] for row in cursor.fetchall()
 ]
+
+# 'Amanda Dias do Amaral',
+# 'CRISTIAN RHEINHEIMER',
+# 'Eduardo Dutra de Lima',
+# 'GUSTAVO BALBINOTT VENASSI',
+# 'Guilherme Rafael Hartmann Soares',
+# 'Gustavo Cesar Burnier',
+# 'JOAO PEDRO MOCELIN',
+# 'Joao Gustavo Santian Da Silva',
+# 'Kaylane Victoria Sousa Sa',
+# 'LUCAS SIMOES BERNART',
+# 'MARJANA  KUHN',
+# 'MAURICIO HENRIQUE CESCO',
+# 'MURILO DUARTE DA SILVA',
+# 'Sidinei Da Silva Dias',
+# 'TIAGO PEDROSO DA SILVA'
 
 opcao = st.selectbox("Escolha o grupo de vendedores:", ["Distribuição (Helder)", "Corporativo (Karen)"])
 vendedores_ativos = vendedores_ativos_helder if "Helder" in opcao else vendedores_ativos_karen
 pasta_relatorios = 'Relatorio_Vendedores_Helder' if "Helder" in opcao else 'Relatorio_Vendedores_Karen'
 
+st.markdown('------')
 # ---------- LEITURA DA REFERÊNCIA ----------
-arquivo_referencia = st.file_uploader("📤 Envie o arquivo de referência (.xlsx):", type=["xlsx"])
+st.markdown('#### 1-Faça o upload do arquivo: historico de rotação com a data mais recente ☁️')
+arquivo_referencia = st.file_uploader("📤 Clique em 'Drag and Drop' ou 'Browse files', selecione o arquivo com a data mais recente e envie o arquivo (histórico de rotação de carteiras):", type=["xlsx"])
 
 if arquivo_referencia:
     df = carregar_dados_sql()
     df = df.drop_duplicates(subset='Raiz_CNPJ')
     referencia = pd.read_excel(arquivo_referencia, sheet_name='Planilha1')
 
+    # --- Carregar data de rotação por conta_id ---
+    conn = sqlite3.connect('historico_rotacao.db')
+    df_rotacao = pd.read_sql_query('''
+        SELECT conta_id, MAX(data_rotacao) as data_ultima_rotacao 
+        FROM historico_rotacao 
+        GROUP BY conta_id
+    ''', conn)
+    conn.close()
+
+    df_rotacao['data_ultima_rotacao'] = pd.to_datetime(df_rotacao['data_ultima_rotacao'])
+
+    df_rotacao['conta_id'] = df_rotacao['conta_id'].apply(
+    lambda x: int.from_bytes(x, byteorder='little') if isinstance(x, bytes) else int(x)
+    )
+
+
     df['Raiz_CNPJ'] = df['Raiz_CNPJ'].astype(str).str.strip().str.zfill(14)
     referencia['Raiz_CNPJ'] = referencia['Raiz_CNPJ'].astype(str).str.strip().str.zfill(14)
-
     dict_transferencia = dict(zip(referencia['Raiz_CNPJ'], referencia['Nome_Vendedor']))
+
+    # Adiciona a coluna 'data_ultima_rotacao' com base no Conta_ID
+    df = df.merge(df_rotacao, how='left', left_on='Conta_ID', right_on='conta_id')
 
     # Atualiza o Nome_Vendedor do df conforme a referência
     df['Nome_Vendedor'] = df.apply(
         lambda row: dict_transferencia[row['Raiz_CNPJ']] if row['Raiz_CNPJ'] in dict_transferencia else row['Nome_Vendedor'],
         axis=1
     )
+
 
     # Agora você pode adicionar a data de entrada
     df['Data_Entrou_Carteira'] = np.where(
@@ -151,9 +372,56 @@ if arquivo_referencia:
 
     # Lógica de status
     data_limite = datetime.today() - timedelta(days=6*30)
+
+    df['Faturamento_6_Meses'] = pd.to_numeric(df['Faturamento_6_Meses'], errors='coerce').fillna(0)
+
     df['Status_Cliente'] = df['Data_Ultima_Venda_Grupo_CNPJ'].apply(
         lambda x: 'Nao Compra' if pd.isna(x) or x < data_limite else 'Compra'
     )
+
+    # --- Garantir tipos corretos ---
+    df['Data_Ultimo_Contato'] = pd.to_datetime(df['Data_Ultimo_Contato'], errors='coerce')
+    df['Data_Ultimo_Followup'] = pd.to_datetime(df['Data_Ultimo_Followup'], errors='coerce')
+    df['Data_Entrou_Carteira'] = pd.to_datetime(df['Data_Entrou_Carteira'], errors='coerce')
+    df['Data_Ultimo_Orcamento'] = pd.to_datetime(df['Data_Ultimo_Orcamento'], errors='coerce')
+
+    # --- Contatos e Follow-ups após rotação ---
+    df['Total_Contatos_Rotacao'] = df.apply(
+        lambda row: row['Total_Contatos'] if pd.notna(row['Data_Entrou_Carteira']) and
+                                            pd.notna(row['Data_Ultimo_Contato']) and
+                                            pd.notna(row['data_ultima_rotacao']) and
+                                            row['Data_Ultimo_Contato'] >= row['Data_Entrou_Carteira']
+                    else 0,
+        axis=1
+    )
+
+    df['Total_Followups_Rotacao'] = df.apply(
+        lambda row: row['Total_Followups'] if pd.notna(row['Data_Entrou_Carteira']) and
+                                            pd.notna(row['Data_Ultimo_Followup']) and
+                                            pd.notna(row['data_ultima_rotacao']) and
+                                            row['Data_Ultimo_Followup'] >= row['Data_Entrou_Carteira']
+                    else 0,
+        axis=1
+    )
+
+    df['Total_Orcamentos_Rotacao'] = df.apply(
+    lambda row: row['Total_Orcamentos'] if pd.notna(row['Data_Entrou_Carteira']) and
+                                              pd.notna(row['Data_Ultimo_Orcamento']) and
+                                              pd.notna(row['data_ultima_rotacao']) and
+                                              row['Data_Ultimo_Orcamento'] >= row['Data_Entrou_Carteira']
+                else 0,
+    axis=1
+    )
+
+    df['Total_Oportunidades_Rotacao'] = df.apply(
+        lambda row: row['Total_Oportunidades'] if pd.notna(row['Data_Entrou_Carteira']) and
+                                                pd.notna(row['Data_Ultima_Oportunidade']) and
+                                                pd.notna(row['data_ultima_rotacao']) and
+                                                row['Data_Ultima_Oportunidade'] >= row['Data_Entrou_Carteira']
+                    else 0,
+        axis=1
+    )
+
 
     df_historico = df[['Raiz_CNPJ', 'Nome_Vendedor']].dropna().drop_duplicates().reset_index(drop=True)
 
@@ -163,30 +431,13 @@ if arquivo_referencia:
         (df['Status_Cliente'] == 'Nao Compra') &
         (df['Data_Abertura_Conta'] < data_limite) &
         ((df['Data_Entrou_Carteira'] < data_limite) | (df['Data_Entrou_Carteira'].isnull())) &
-        (df['Grupo_Econômico_ID'].isnull())
+        ((df['Grupo_Econômico_ID'].isnull()) | (df['Grupo_Econômico_ID'] == ''))
     ]
 
     if "Helder" in opcao:
         contas_filtradas = contas_vao_rotacionar[contas_vao_rotacionar['Classificacao_Conta'].isin([5, 7])]
     else:
         contas_filtradas = contas_vao_rotacionar[~contas_vao_rotacionar['Classificacao_Conta'].isin([5, 7])]
-
-    st.success(f"{len(contas_filtradas)} contas selecionadas para rotação.")
-
-    def criar_tabela_historico():
-        conn = sqlite3.connect('historico_rotacao.db')
-        c = conn.cursor()
-        c.execute('''
-        CREATE TABLE IF NOT EXISTS historico_rotacao (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome_vendedor TEXT,
-            conta_id INTEGER,
-            tipo_rotacao TEXT,
-            data_rotacao TEXT
-        )
-        ''')
-        conn.commit()
-        conn.close()
 
     def registrar_historico_rotacao(nome_vendedor, conta_id, tipo_rotacao, data_rotacao):
         conn = sqlite3.connect('historico_rotacao.db')
@@ -222,38 +473,38 @@ if arquivo_referencia:
             df_resultado.at[idx, 'Nome_Vendedor'] = novo_vendedor
             df_resultado.at[idx, 'Data_Entrou_Carteira'] = data_hoje
 
+            # Registrar histórico no banco
+        for idx, novo_vendedor in novos_nomes:
+            conta_id = df_contas.at[idx, 'Conta_ID']
+            registrar_historico_rotacao(
+                nome_vendedor=novo_vendedor,
+                conta_id=conta_id,
+                tipo_rotacao='Automática',
+                data_rotacao=data_hoje.strftime('%Y-%m-%d')
+            )
+
         df_rotacionadas = df_resultado.loc[[idx for idx, _ in novos_nomes]].reset_index(drop=True)
         df_sobras = df_resultado.loc[indices_sobras].reset_index(drop=True)
 
         return df_rotacionadas, df_sobras
     
-    def salvar_historico_rotacao(df_rotacionadas, nome_banco='historico_rotacao.db'):
-        conn = sqlite3.connect(nome_banco)
-        
-        # Garante que a tabela exista
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS historico_rotacao (
-                Raiz_CNPJ TEXT,
-                Nome_Vendedor TEXT,
-                Data_Entrou_Carteira DATE
-            )
-        ''')
-
-        # Insere os dados novos
-        df_rotacionadas[['Raiz_CNPJ', 'Nome_Vendedor', 'Data_Entrou_Carteira']].to_sql(
-            'historico_rotacao',
-            conn,
-            if_exists='append',
-            index=False
-        )
-        
+    def registrar_historico_rotacao(nome_vendedor, conta_id, tipo_rotacao, data_rotacao):
+        conn = sqlite3.connect('historico_rotacao.db')
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO historico_rotacao (nome_vendedor, conta_id, tipo_rotacao, data_rotacao)
+            VALUES (?, ?, ?, ?)
+        ''', (nome_vendedor, conta_id, tipo_rotacao, data_rotacao))
+        conn.commit()
         conn.close()
 
+
     # Botão de rotação
+st.markdown('#### 2-Clique no botão para rotacionar.')
 if st.button("🔁 Rodar contas agora"):
     contas_rotacionadas, contas_sobras = rotacionar_contas(contas_filtradas, vendedores_ativos, df_historico)
 
-    st.success(f"{len(contas_rotacionadas)} contas rotacionadas com sucesso.")
+    st.success(f"Foram encontradas {len(contas_filtradas)} clientes disponiveis para rotação e {len(contas_rotacionadas)} foram rotacionados com sucesso.")
     st.write("Contas rotacionadas:")
     st.dataframe(contas_rotacionadas)
     st.session_state["contas_rotacionadas"] = contas_rotacionadas
@@ -273,6 +524,16 @@ if st.button("🔁 Rodar contas agora"):
     st.write("Contas sem rotação (sem vendedor disponível):")
     st.dataframe(contas_sobras)
 
+# # VERIFICAÇÃO DE HISTORICO
+# st.subheader("📚 Histórico de Rotações Registradas")
+
+# if st.checkbox("🔍 Mostrar histórico de rotações"):
+#     conn = sqlite3.connect('historico_rotacao.db')
+#     df_historico = pd.read_sql_query("SELECT * FROM historico_rotacao ORDER BY data_rotacao DESC", conn)
+#     conn.close()
+#     st.dataframe(df_historico)
+
+
 # Gerar downloads fora do if
 def gerar_excel_download(df):
     from io import BytesIO
@@ -282,142 +543,161 @@ def gerar_excel_download(df):
     return output.getvalue()
 
 if "contas_rotacionadas" in st.session_state:
+    st.markdown('#### 3-Faça o Download das contas rotacionadas e armazene no servidor')
+    st.markdown('👇 Clique no botão abaixo para fazer o download do historico de rotação.')
     st.download_button(
         "📥 Baixar contas rotacionadas",
         data=gerar_excel_download(st.session_state["contas_rotacionadas"]),
         file_name=f"historico_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     )
 
-if "contas_sobras" in st.session_state:
-    st.download_button(
-        "📥 Baixar contas sem rotação",
-        data=gerar_excel_download(st.session_state["contas_sobras"]),
-        file_name="contas_sobras.xlsx"
-    )
+# if "contas_sobras" in st.session_state:
+#     st.download_button(
+#         "📥 Baixar contas sem rotação",
+#         data=gerar_excel_download(st.session_state["contas_sobras"]),
+#         file_name="contas_sobras.xlsx"
+#     )
 
 
-else:
-    st.info("Envie o arquivo de referência para continuar.")
+# else:
+#     st.info("Envie o arquivo de referência para continuar.")
     
 st.markdown("---")
+
 st.subheader("📊 Gerar Relatórios por Vendedor")
 
+st.markdown('👇 Clique no botão abaixo para fazer o download dos relatórios de rotação.')
+
 if st.button("📄 Gerar Relatório Completo e por Vendedor"):
-    if "contas_rotacionadas" not in st.session_state:
-        st.warning("⚠️ Você precisa realizar a rotação antes de gerar o relatório.")
+
+    # Define df_atual com base na existência de rotação
+    if "contas_rotacionadas" in st.session_state:
+        df_atual = st.session_state["contas_rotacionadas"].copy()
+        st.success("✅ Usando contas rotacionadas para o relatório.")
     else:
-        def gerar_relatorios(df_atual, df_anterior, data_limite, data_rotacao, pasta_destino='Relatorio_Rotação'):
-            os.makedirs(pasta_destino, exist_ok=True)
+        df_atual = df_filtrado.copy()
+        st.warning("⚠️ Nenhuma rotação foi realizada. Usando base atual para gerar relatório.")
 
-            data_rotacao = pd.to_datetime(data_rotacao).normalize()
-            data_limite = pd.to_datetime(data_limite).normalize()
+    def gerar_relatorios(df_atual, df_anterior, data_limite, data_rotacao, pasta_destino='Relatorio_Rotação'):
+        os.makedirs(pasta_destino, exist_ok=True)
 
-            for df in [df_atual, df_anterior]:
-                df['Data_Entrou_Carteira'] = pd.to_datetime(df['Data_Entrou_Carteira'], errors='coerce')
-                df['Data_Ultima_Venda_Grupo_CNPJ'] = pd.to_datetime(df['Data_Ultima_Venda_Grupo_CNPJ'], errors='coerce')
+        data_rotacao = pd.to_datetime(data_rotacao).normalize()
+        data_limite = pd.to_datetime(data_limite).normalize()
 
-            vendedores = df_atual['Nome_Vendedor'].dropna().unique()
-            arquivos_por_vendedor = {}
+        for df in [df_atual, df_anterior]:
+            df['Data_Entrou_Carteira'] = pd.to_datetime(df['Data_Entrou_Carteira'], errors='coerce')
+            df['Data_Ultima_Venda_Grupo_CNPJ'] = pd.to_datetime(df['Data_Ultima_Venda_Grupo_CNPJ'], errors='coerce')
 
-            # Relatório completo
-            writer = pd.ExcelWriter(f'{pasta_destino}/relatorio_mensal_completo.xlsx', engine='xlsxwriter')
+        vendedores = df_atual['Nome_Vendedor'].dropna().unique()
+        arquivos_por_vendedor = {}
 
-            for vendedor in vendedores:
-                atual_vend = df_atual[df_atual['Nome_Vendedor'] == vendedor].copy()
-                anterior_vend = df_anterior[df_anterior['Nome_Vendedor'] == vendedor].copy()
+        writer = pd.ExcelWriter(f'{pasta_destino}/relatorio_mensal_completo.xlsx', engine='xlsxwriter')
 
-                def montar_bloco(df, status):
-                    bloco = df[['Nome_Vendedor', 'Razao_Social_Pessoas', 'Raiz_CNPJ', 'Faturamento_6_Meses',
-                                'Data_Ultima_Venda_Grupo_CNPJ', 'Data_Entrou_Carteira']].copy()
-                    bloco.insert(0, 'Status', status)
-                    return bloco
+        for vendedor in vendedores:
+            atual_vend = df_atual[df_atual['Nome_Vendedor'] == vendedor].copy()
+            anterior_vend = df_anterior[df_anterior['Nome_Vendedor'] == vendedor].copy()
 
-                usados = set()
-                blocos = []
+            def montar_bloco(df, status):
+                bloco = df[[
+                    'Nome_Vendedor',
+                    'Razao_Social_Pessoas',
+                    'Raiz_CNPJ',
+                    'Faturamento_6_Meses',
+                    'Total_Pedidos',
+                    'Data_Ultima_Venda_Grupo_CNPJ',
+                    'Data_Entrou_Carteira',
+                    'data_ultima_rotacao',
+                    'Total_Contatos_Rotacao',
+                    'Data_Ultimo_Contato',
+                    'Total_Followups_Rotacao',
+                    'Data_Ultimo_Followup',
+                    'Total_Orcamentos_Rotacao',
+                    'Data_Ultimo_Orcamento'
+                ]].copy()
+                bloco.insert(0, 'Status', status)
+                return bloco
 
-                ativas = anterior_vend[
-                    (anterior_vend['Data_Ultima_Venda_Grupo_CNPJ'] >= data_limite) &
-                    (~anterior_vend['Raiz_CNPJ'].isin(usados))
-                ]
-                usados.update(ativas['Raiz_CNPJ'])
-                blocos.append(montar_bloco(ativas, 'Ativa'))
+            usados = set()
+            blocos = []
 
-                seis_meses_atras = data_rotacao - pd.DateOffset(months=6)
-                recentes = anterior_vend[
-                    (anterior_vend['Data_Entrou_Carteira'] >= seis_meses_atras) &
-                    (anterior_vend['Data_Entrou_Carteira'] != data_rotacao) &
-                    (~anterior_vend['Raiz_CNPJ'].isin(usados))
-                ]
-                usados.update(recentes['Raiz_CNPJ'])
-                blocos.append(montar_bloco(recentes, 'Entraram Recentemente'))
+            ativas = anterior_vend[
+                (
+                    (anterior_vend['Data_Ultima_Venda_Grupo_CNPJ'] >= data_limite) |
+                    (anterior_vend['Grupo_Econômico_ID'].notnull())
+                ) &
+                (~anterior_vend['Raiz_CNPJ'].isin(usados))
+            ]
+            usados.update(ativas['Raiz_CNPJ'])
+            blocos.append(montar_bloco(ativas, 'Ativa'))
 
-                novas = atual_vend[
-                    (atual_vend['Data_Entrou_Carteira'] == data_rotacao) &
-                    (~atual_vend['Raiz_CNPJ'].isin(usados))
-                ]
-                usados.update(novas['Raiz_CNPJ'])
-                blocos.append(montar_bloco(novas, 'Novas Recebidas'))
+            seis_meses_atras = data_rotacao - pd.DateOffset(months=6)
+            recentes = anterior_vend[
+                (anterior_vend['Data_Entrou_Carteira'] >= seis_meses_atras) &
+                (anterior_vend['Data_Entrou_Carteira'] != data_rotacao) &
+                (~anterior_vend['Raiz_CNPJ'].isin(usados))
+            ]
+            usados.update(recentes['Raiz_CNPJ'])
+            blocos.append(montar_bloco(recentes, 'Entraram Recentemente'))
 
-                cadastradas_recente = anterior_vend[
-                    (anterior_vend['Data_Abertura_Conta'] >= seis_meses_atras) &
-                    (~anterior_vend['Raiz_CNPJ'].isin(usados))
-                ]
-                usados.update(cadastradas_recente['Raiz_CNPJ'])
-                blocos.append(montar_bloco(cadastradas_recente, 'Cadastrado Recentemente'))
+            novas = atual_vend[
+                (atual_vend['Data_Entrou_Carteira'] == data_rotacao) &
+                (~atual_vend['Raiz_CNPJ'].isin(usados))
+            ]
+            usados.update(novas['Raiz_CNPJ'])
+            blocos.append(montar_bloco(novas, 'Novas Recebidas'))
 
-                retiradas = anterior_vend[
-                    (~anterior_vend['Raiz_CNPJ'].isin(atual_vend['Raiz_CNPJ'])) &
-                    (~anterior_vend['Raiz_CNPJ'].isin(usados))
-                ]
-                usados.update(retiradas['Raiz_CNPJ'])
-                blocos.append(montar_bloco(retiradas, 'Retiradas'))
+            cadastradas_recente = anterior_vend[
+                (anterior_vend['Data_Abertura_Conta'] >= seis_meses_atras) &
+                (~anterior_vend['Raiz_CNPJ'].isin(usados))
+            ]
+            usados.update(cadastradas_recente['Raiz_CNPJ'])
+            blocos.append(montar_bloco(cadastradas_recente, 'Cadastrado Recentemente'))
 
-                # Combina todos os blocos e organiza
-                df_relatorio = pd.concat(blocos, ignore_index=True)
-                df_relatorio = df_relatorio.drop_duplicates(subset='Raiz_CNPJ', keep='first')
-                df_relatorio = df_relatorio.sort_values(['Status', 'Razao_Social_Pessoas']).reset_index(drop=True)
+            retiradas = anterior_vend[
+                (~anterior_vend['Raiz_CNPJ'].isin(atual_vend['Raiz_CNPJ'])) &
+                (~anterior_vend['Raiz_CNPJ'].isin(usados))
+            ]
+            usados.update(retiradas['Raiz_CNPJ'])
+            blocos.append(montar_bloco(retiradas, 'Retiradas'))
 
-                # Salva o relatório individual de cada vendedor
-                if not df_relatorio.empty:
-                    nome_arquivo_vendedor = f"{pasta_destino}/relatorio_{vendedor.replace(' ', '_')}_{data_rotacao.strftime('%Y-%m-%d')}.xlsx"
-                    df_relatorio.to_excel(nome_arquivo_vendedor, index=False)
-                    arquivos_por_vendedor[vendedor] = nome_arquivo_vendedor
+            df_relatorio = pd.concat(blocos, ignore_index=True)
+            df_relatorio = df_relatorio.drop_duplicates(subset='Raiz_CNPJ', keep='first')
+            df_relatorio = df_relatorio.sort_values(['Status', 'Razao_Social_Pessoas']).reset_index(drop=True)
 
-                    # Adiciona ao relatório mensal completo como uma aba
-                    aba = vendedor[:31]  # Limite de 31 caracteres no nome da aba
-                    df_relatorio.to_excel(writer, sheet_name=aba, index=False)
+            if not df_relatorio.empty:
+                nome_arquivo_vendedor = f"{pasta_destino}/relatorio_{vendedor.replace(' ', '_')}_{data_rotacao.strftime('%Y-%m-%d')}.xlsx"
+                df_relatorio.to_excel(nome_arquivo_vendedor, index=False)
+                arquivos_por_vendedor[vendedor] = nome_arquivo_vendedor
 
-            writer.close()
+                aba = vendedor[:31]
+                df_relatorio.to_excel(writer, sheet_name=aba, index=False)
 
-            return arquivos_por_vendedor
+        writer.close()
+        return arquivos_por_vendedor
 
-        # Gerar os relatórios
-        arquivos_gerados = gerar_relatorios(
-            st.session_state["contas_rotacionadas"],
-            df_filtrado,
-            data_limite=data_limite,
-            data_rotacao=pd.Timestamp.today().normalize(),
-            pasta_destino='Relatorio_Rotação'
+
+    arquivos_gerados = gerar_relatorios(
+        df_atual=df_atual,
+        df_anterior=df_filtrado,
+        data_limite=data_limite,
+        data_rotacao=pd.Timestamp.today().normalize(),
+        pasta_destino='Relatorio_Rotação'
+    )
+
+    st.success("✅ Relatórios gerados com sucesso!")
+
+    zip_file_path = os.path.join(tempfile.gettempdir(), "relatorios_rotacao.zip")
+    with zipfile.ZipFile(zip_file_path, 'w') as zipf:
+        zipf.write('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'relatorio_mensal_completo.xlsx')
+        for vendedor, arquivo in arquivos_gerados.items():
+            zipf.write(arquivo, arquivo.split('/')[-1])
+
+    with open(zip_file_path, 'rb') as f:
+        st.download_button(
+            label="📥 Baixar Todos os Relatórios",
+            data=f,
+            file_name="relatorios_rotacao.zip",
+            mime="application/zip"
         )
 
-        st.success("✅ Relatórios gerados com sucesso!")
-
-        # Gerar um único arquivo ZIP contendo todos os relatórios
-        zip_file_path = os.path.join(os.getcwd(), 'relatorios_rotacao.zip')
-        with zipfile.ZipFile(zip_file_path, 'w') as zipf:
-            # Adiciona o relatório completo
-            zipf.write('Relatorio_Rotação/relatorio_mensal_completo.xlsx', 'relatorio_mensal_completo.xlsx')
-
-            # Adiciona os relatórios individuais de cada vendedor
-            for vendedor, arquivo in arquivos_gerados.items():
-                zipf.write(arquivo, arquivo.split('/')[-1])
-
-        # Botão de download para todos os relatórios em um único arquivo ZIP
-        with open(zip_file_path, 'rb') as f:
-            st.download_button(
-                label="📥 Baixar Todos os Relatórios",
-                data=f,
-                file_name="relatorios_rotacao.zip",
-                mime="application/zip"
-            )
 
